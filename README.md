@@ -5,8 +5,14 @@
 This project is based on Python3 and can be run by virtualenv. Use the following command to prepare a virtualenv
 `
 python3 -m venv .venv
+`
+`
 source .venv/bin/activate
+`
+`
 pip install -U pip
+`
+`
 pip install -r requirements.txt
 `
 
