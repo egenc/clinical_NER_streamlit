@@ -41,56 +41,88 @@ spark = sparknlp_jsl.start(license_keys['SECRET'],params=params)
 print ("Spark NLP Version :", sparknlp.version())
 print ("Spark NLP_JSL Version :", sparknlp_jsl.version())
 # Annotator that transforms a text column from dataframe into an Annotation ready for NLP
-documentAssembler = DocumentAssembler()\
-        .setInputCol("text")\
-        .setOutputCol("document")
 
-# Sentence Detector annotator, processes various sentences per line
+medical_models = ['ner_clinical_large', "ner_jsl_greedy", 'ner_jsl']
 
-#sentenceDetector = SentenceDetector()\
-        #.setInputCols(["document"])\
-        #.setOutputCol("sentence")
 
-sentenceDetector = SentenceDetectorDLModel.pretrained("sentence_detector_dl_healthcare","en","clinical/models")\
-        .setInputCols(["document"])\
-        .setOutputCol("sentence")
+@st.cache(allow_output_mutation=True)
+def load_pipeline(MODEL_NAME):
+    documentAssembler = DocumentAssembler()\
+            .setInputCol("text")\
+            .setOutputCol("document")
+
+    # Sentence Detector annotator, processes various sentences per line
+
+    #sentenceDetector = SentenceDetector()\
+            #.setInputCols(["document"])\
+            #.setOutputCol("sentence")
+
+    sentenceDetector = SentenceDetectorDLModel.pretrained("sentence_detector_dl_healthcare","en","clinical/models")\
+            .setInputCols(["document"])\
+            .setOutputCol("sentence")
+    
+    # Tokenizer splits words in a relevant format for NLP
+    tokenizer = Tokenizer()\
+            .setInputCols(["sentence"])\
+            .setOutputCol("token")
+    spellModel = ContextSpellCheckerModel\
+            .pretrained('spellcheck_clinical', 'en', 'clinical/models')\
+            .setInputCols("token")\
+            .setOutputCol("checked")
+
+    # Clinical word embeddings trained on PubMED dataset
+    word_embeddings = WordEmbeddingsModel.pretrained("embeddings_clinical","en","clinical/models")\
+            .setInputCols(["sentence","token"])\
+            .setOutputCol("embeddings")
+
+    # NER model trained on i2b2 (sampled from MIMIC) dataset
+    clinical_ner = MedicalNerModel.pretrained(MODEL_NAME,"en","clinical/models")\
+            .setInputCols(["sentence","token","embeddings"])\
+            .setOutputCol("ner")
+
+    ner_converter = NerConverter()\
+            .setInputCols(["sentence","token","ner"])\
+            .setOutputCol("ner_chunk")
+
+    clinical_assertion = AssertionDLModel.pretrained("assertion_dl", "en", "clinical/models") \
+            .setInputCols(["sentence", "ner_chunk", "embeddings"]) \
+            .setOutputCol("assertion")
+
+    sbert_embedder = BertSentenceEmbeddings\
+            .pretrained("sbiobert_base_cased_mli","en","clinical/models")\
+            .setInputCols(["ner_chunk_doc"])\
+            .setOutputCol("sbert_embeddings")
  
-# Tokenizer splits words in a relevant format for NLP
-tokenizer = Tokenizer()\
-        .setInputCols(["sentence"])\
-        .setOutputCol("token")
+    cpt_resolver = SentenceEntityResolverModel.pretrained("sbiobertresolve_cpt","en", "clinical/models") \
+            .setInputCols(["ner_chunk", "sbert_embeddings"]) \
+            .setOutputCol("resolution")\
+            .setDistanceFunction("EUCLIDEAN")
 
-# Clinical word embeddings trained on PubMED dataset
-word_embeddings = WordEmbeddingsModel.pretrained("embeddings_clinical","en","clinical/models")\
-        .setInputCols(["sentence","token"])\
-        .setOutputCol("embeddings")
+    nlpPipeline = Pipeline(stages=[
+            documentAssembler,
+            sentenceDetector,
+            tokenizer,
+            spellModel,
+            word_embeddings,
+            clinical_ner,
+            ner_converter,
+            clinical_assertion,
+            sbert_embedder,
+            cpt_resolver])
 
-# NER model trained on i2b2 (sampled from MIMIC) dataset
-clinical_ner = MedicalNerModel.pretrained("ner_clinical_large","en","clinical/models")\
-        .setInputCols(["sentence","token","embeddings"])\
-        .setOutputCol("ner")
+    empty_data = spark.createDataFrame([[""]]).toDF("text")
 
-ner_converter = NerConverter()\
-        .setInputCols(["sentence","token","ner"])\
-        .setOutputCol("ner_chunk")
-
-nlpPipeline = Pipeline(stages=[
-        documentAssembler,
-        sentenceDetector,
-        tokenizer,
-        word_embeddings,
-        clinical_ner,
-        ner_converter])
-
-empty_data = spark.createDataFrame([[""]]).toDF("text")
-
-model = nlpPipeline.fit(empty_data)
+    model = nlpPipeline.fit(empty_data)
+    return model
 
 
 
 st.title('NER model for Clinical Entities')
 st.write("Please select an index which will be passed to a NER model:")
+sparknlp_model = st.sidebar.selectbox("Pipeline name", medical_models)
+model_load_state = st.info(f"Loading pretrained pipeline '{sparknlp_model}'...")
 
+model_load_state.empty()
 
 def main():
   import pandas as pd
@@ -115,7 +147,8 @@ def main():
   text = texts[idx]
 
   
-  light_model = LightPipeline(model)
+  light_model = LightPipeline(load_pipeline(sparknlp_model))
+
   light_result = light_model.fullAnnotate(text)
   
 
