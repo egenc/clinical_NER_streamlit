@@ -47,74 +47,115 @@ medical_models = ['ner_clinical_large', "ner_jsl_greedy", 'ner_jsl']
 
 @st.cache(allow_output_mutation=True)
 def load_pipeline(MODEL_NAME):
-    documentAssembler = DocumentAssembler()\
-            .setInputCol("text")\
-            .setOutputCol("document")
+        documentAssembler = DocumentAssembler()\
+                .setInputCol("text")\
+                .setOutputCol("document")
+        
 
-    # Sentence Detector annotator, processes various sentences per line
+        # .setOutputCol("document")
+        # Sentence Detector annotator, processes various sentences per line
 
-    #sentenceDetector = SentenceDetector()\
-            #.setInputCols(["document"])\
-            #.setOutputCol("sentence")
+        #sentenceDetector = SentenceDetector()\
+                #.setInputCols(["document"])\
+                #.setOutputCol("sentence")
 
-    sentenceDetector = SentenceDetectorDLModel.pretrained("sentence_detector_dl_healthcare","en","clinical/models")\
-            .setInputCols(["document"])\
-            .setOutputCol("sentence")
+        sentenceDetector = SentenceDetectorDLModel.pretrained("sentence_detector_dl_healthcare","en","clinical/models")\
+                .setInputCols(["document"])\
+                .setOutputCol("sentence")
+
+        # Tokenizer splits words in a relevant format for NLP
+        tokenizer = Tokenizer()\
+                .setInputCols(["sentence"])\
+                .setOutputCol("token")
+
+
+        # Clinical word embeddings trained on PubMED dataset
+        word_embeddings = WordEmbeddingsModel.pretrained("embeddings_clinical","en","clinical/models")\
+                .setInputCols(["sentence","token"])\
+                .setOutputCol("embeddings")
+
+        pos_tagger = PerceptronModel()\
+                .pretrained("pos_clinical", "en", "clinical/models") \
+                .setInputCols(["sentence", "token"])\
+                .setOutputCol("pos_tags")
     
-    # Tokenizer splits words in a relevant format for NLP
-    tokenizer = Tokenizer()\
-            .setInputCols(["sentence"])\
-            .setOutputCol("token")
-    spellModel = ContextSpellCheckerModel\
-            .pretrained('spellcheck_clinical', 'en', 'clinical/models')\
-            .setInputCols("token")\
-            .setOutputCol("checked")
+        dependency_parser = DependencyParserModel()\
+                .pretrained("dependency_conllu", "en")\
+                .setInputCols(["sentence", "pos_tags", "token"])\
+                .setOutputCol("dependencies")
 
-    # Clinical word embeddings trained on PubMED dataset
-    word_embeddings = WordEmbeddingsModel.pretrained("embeddings_clinical","en","clinical/models")\
-            .setInputCols(["sentence","token"])\
-            .setOutputCol("embeddings")
+        clinical_ner_tagger = MedicalNerModel()\
+                .pretrained('jsl_ner_wip_greedy_clinical','en','clinical/models')\
+                .setInputCols("sentences", "token", "embeddings")\
+                .setOutputCol("ner_tags")    
 
-    # NER model trained on i2b2 (sampled from MIMIC) dataset
-    clinical_ner = MedicalNerModel.pretrained(MODEL_NAME,"en","clinical/models")\
-            .setInputCols(["sentence","token","embeddings"])\
-            .setOutputCol("ner")
+        ner_chunker = NerConverter()\
+                .setInputCols(["sentence", "token", "ner_tags"])\
+                .setOutputCol("ner_chunks")
 
-    ner_converter = NerConverter()\
-            .setInputCols(["sentence","token","ner"])\
-            .setOutputCol("ner_chunk")
+        # NER model trained on i2b2 (sampled from MIMIC) dataset
+        clinical_ner = MedicalNerModel.pretrained(MODEL_NAME,"en","clinical/models")\
+                .setInputCols(["sentence","token","embeddings"])\
+                .setOutputCol("ner")
 
-    clinical_assertion = AssertionDLModel.pretrained("assertion_dl", "en", "clinical/models") \
-            .setInputCols(["sentence", "ner_chunk", "embeddings"]) \
-            .setOutputCol("assertion")
+        #####
+        ner_converter = NerConverter()\
+                .setInputCols(["sentence","token","ner"])\
+                .setOutputCol("ner_chunk")
+                # .setWhiteList(['PROBLEM'])
+        #####
+        # c2doc = Chunk2Doc()\
+        #         .setInputCols('ner_chunk')\
+        #         .setOutputCol("ner_chunk_doc")
 
-    sbert_embedder = BertSentenceEmbeddings\
-            .pretrained("sbiobert_base_cased_mli","en","clinical/models")\
-            .setInputCols(["ner_chunk_doc"])\
-            .setOutputCol("sbert_embeddings")
- 
-    cpt_resolver = SentenceEntityResolverModel.pretrained("sbiobertresolve_cpt","en", "clinical/models") \
-            .setInputCols(["ner_chunk", "sbert_embeddings"]) \
-            .setOutputCol("resolution")\
-            .setDistanceFunction("EUCLIDEAN")
+        clinical_assertion = AssertionDLModel.pretrained("assertion_dl", "en", "clinical/models") \
+                .setInputCols(["sentence", "ner_chunk", "embeddings"]) \
+                .setOutputCol("assertion")
 
-    nlpPipeline = Pipeline(stages=[
-            documentAssembler,
-            sentenceDetector,
-            tokenizer,
-            spellModel,
-            word_embeddings,
-            clinical_ner,
-            ner_converter,
-            clinical_assertion,
-            sbert_embedder,
-            cpt_resolver])
+        sbert_embedder = BertSentenceEmbeddings\
+                .pretrained('sbiobert_base_cased_mli', 'en','clinical/models')\
+                .setInputCols(["document"])\
+                .setOutputCol("sbert_embeddings")
+        
+        cpt_resolver = SentenceEntityResolverModel.pretrained("sbiobertresolve_cpt_procedures_augmented","en", "clinical/models") \
+                .setInputCols(["document", "sbert_embeddings"]) \
+                .setOutputCol("cpt_code")\
+                .setDistanceFunction("EUCLIDEAN")
 
-    empty_data = spark.createDataFrame([[""]]).toDF("text")
+        re_model = RelationExtractionModel()\
+                .pretrained("re_bodypart_directions", "en", 'clinical/models')\
+                .setInputCols(["embeddings", "pos_tags", "ner_chunks", "dependencies"])\
+                .setOutputCol("relations")\
+                .setRelationPairs(['direction-external_body_part_or_region', 
+                                'external_body_part_or_region-direction',
+                                'direction-internal_organ_or_component',
+                                'internal_organ_or_component-direction'
+                                ])\
+                .setMaxSyntacticDistance(4)\
+                .setPredictionThreshold(0.9)
 
-    model = nlpPipeline.fit(empty_data)
-    return model
 
+        nlpPipeline = Pipeline(stages=[
+                documentAssembler,
+                sentenceDetector,
+                tokenizer,
+                word_embeddings,
+                pos_tagger,
+                dependency_parser,
+                clinical_ner_tagger,
+                ner_chunker,
+                clinical_ner,
+                ner_converter,
+                clinical_assertion,
+                sbert_embedder,
+                cpt_resolver,
+                re_model])
+        
+        
+        empty_data = spark.createDataFrame([[""]]).toDF("text")
+
+        model = nlpPipeline.fit(empty_data)
+        return model
 
 
 st.title('NER model for Clinical Entities')
@@ -125,54 +166,81 @@ model_load_state = st.info(f"Loading pretrained pipeline '{sparknlp_model}'...")
 model_load_state.empty()
 
 def main():
-  import pandas as pd
-  import re
+        import pandas as pd
+        import re
 
-  df = pd.read_csv('mimic_100_pats.csv', low_memory = False)
+        df = pd.read_csv('mimic_100_pats.csv', low_memory = False)
 
-  texts = []
-  for idx in range(len(df)):
-      begin = df.TEXT[idx].find('History of Present Illness:')
-      if begin == -1:
-          begin = df.TEXT[idx].find('-year-old')
-      if begin == -1:
-          continue
-      end = df.TEXT[idx].find('Past Medical History:')
-      text = df.TEXT[idx][begin+len('-year-old'):end]
-      texts.append(text)
+        idx = st.slider("Index of the patient", 1, 100,1)
+        text = df.TEXT[idx]
 
-  idx = st.slider("Index of the patient", 1, len(texts),1)
-  st.subheader(texts[idx])
+        # st.subheader(text)
 
-  text = texts[idx]
+        light_model = LightPipeline(load_pipeline(sparknlp_model))
+        light_result = light_model.fullAnnotate(text)
 
-  
-  light_model = LightPipeline(load_pipeline(sparknlp_model))
+        chunks = []
+        entities = []
+        status = []
+        codes = []
+        all_codes = []
+        resolutions = []
 
-  light_result = light_model.fullAnnotate(text)
-  
+        rel_pairs=[]
+
+        print('-'*100)
+        print(light_result[0]['relations'])
+        print('-'*100)
+        #   , code , light_result[0]['cpt_code']
+        for chunk, assertion, code in zip(light_result[0]['ner_chunk'] ,light_result[0]['assertion'], light_result[0]['cpt_code']):
+                
+                chunks.append(chunk.result)
+                entities.append(chunk.metadata['entity']) 
+                status.append(assertion.result)
+                codes.append(code.result) 
+                all_codes.append(code.metadata['all_k_results'].split(':::'))
+                resolutions.append(code.metadata['all_k_resolutions'].split(':::'))
+
+        def get_relations_df (results, col='relations'):
+                rel_pairs=[]
+                for rel in results[0][col]:
+                        rel_pairs.append((
+                        rel.result, 
+                        rel.metadata['entity1'], 
+                        rel.metadata['entity1_begin'],
+                        rel.metadata['entity1_end'],
+                        rel.metadata['chunk1'], 
+                        rel.metadata['entity2'],
+                        rel.metadata['entity2_begin'],
+                        rel.metadata['entity2_end'],
+                        rel.metadata['chunk2'], 
+                        rel.metadata['confidence']
+                        ))
+
+                rel_df = pd.DataFrame(rel_pairs, columns=['relations',
+                                                        'entity1','entity1_begin','entity1_end','chunk1',
+                                                        'entity2','entity2_end','entity2_end','chunk2', 
+                                                        'confidence'])
+                # limit df columns to get entity and chunks with results only
+                rel_df = rel_df.iloc[:,[0,1,4,5,8,9]]
+                
+                return rel_df
 
 
-  chunks = []
-  entities = []
-  sentence= []
-  begin = []
-  end = []
+        rel_df = get_relations_df(light_result)
 
-  for n in light_result[0]['ner_chunk']:
-          
-      begin.append(n.begin)
-      end.append(n.end)
-      chunks.append(n.result)
-      entities.append(n.metadata['entity']) 
-      sentence.append(n.metadata['sentence'])
-      
-      
+        print(len(chunks))
+        print(len(entities))
+        print(len(status))
+        # print(len(codes))
+        # print(len(resolutions))
 
-  df = pd.DataFrame({'chunks':chunks, 'begin': begin, 'end':end, 
-                    'sentence_id':sentence, 'entities':entities})
+        # df = pd.DataFrame({'chunks':chunks, 'entities':entities, 'assertion':status})
+        df = pd.DataFrame({'chunks':chunks, 'entities':entities, 'assertion':status, 'codes':codes, 'all_codes':all_codes, 'resolutions':resolutions})
 
-  st.dataframe(df)
+        st.dataframe(df)
+        st.dataframe(rel_df)
+
 
 if __name__ == '__main__':
-  main()
+    main()
