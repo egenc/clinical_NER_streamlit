@@ -19,7 +19,7 @@ jobs:
       - name: List all changed files
         run: |
           for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
-            if $file -f "Dockerfile"; then
+            if file -f "Dockerfile"; then
                 echo "$file exists."
             fi
           done
