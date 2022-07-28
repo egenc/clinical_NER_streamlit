@@ -17,7 +17,7 @@ jobs:
         uses: tj-actions/changed-files@v24
         with:
           files: |
-            Dockerfile
+            containers/**/Dockerfile
 
       - name: List all changed files
         run: |
